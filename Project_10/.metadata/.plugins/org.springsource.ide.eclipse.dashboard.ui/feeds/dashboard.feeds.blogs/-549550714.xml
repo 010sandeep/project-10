@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0"><channel><title><![CDATA[Spring]]></title><description><![CDATA[Level up your Java code and explore what Spring can do for you.]]></description><link>https://spring.io</link><generator>GatsbyJS</generator><lastBuildDate>Tue, 22 Jul 2025 07:03:55 GMT</lastBuildDate><item><title><![CDATA[Spring Data JDBC and R2DBC 4.0 will support Composite IDs]]></title><link>https://spring.io/blog/2025/07/22/spring-data-jdbc-composite-id</link><guid isPermaLink="true">https://spring.io/blog/2025/07/22/spring-data-jdbc-composite-id</guid><dc:creator><![CDATA[schauder]]></dc:creator><pubDate>Tue, 22 Jul 2025 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;I&apos;m happy to announce, that Spring Data JDBC and R2DBC finally support Composite IDs starting with version 4.0-M4.&lt;/p&gt;
+&lt;p&gt;Most of you probably know, but just to make sure everyone has the same understanding:
+From the database point of view a composite id (or composite key) is a primary key that consists of more than one column.
+On the Java side these columns get mapped to an entity with an attribute for each column
+Usage should be straight forward and I&apos;ll demonstrate it in the following article for JDBC.
+Usage in R2DBC is anlogous.&lt;/p&gt;
+&lt;p&gt;To get started just put an &lt;code&gt;@Id&lt;/code&gt; annotation on a field in your aggregate root that references an entity, instead of a simple type.&lt;/p&gt;
+&lt;pre&gt;&lt;code class=&quot;language-java&quot;&gt;class Employee {
+
+	@Id
+	EmployeeId id;
+
+	String name;
+
+	// ...
+}
+
+record EmployeeId(
+		Organization organization,
+		Long employeeNumber) {
+}
+
+enum Organization {
+	RND,
+	SALES,
+	MARKETING,
+	PURCHASING
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;That reference becomes automatically an embedded reference, i.e. the fields of the entity become columns of the table of the aggregate root.&lt;/p&gt;
+&lt;pre&gt;&lt;code class=&quot;language-sql&quot;&gt;create table employee
+(
+    organization    varchar(20),
+    employee_number int,
+    name            varchar(100)
+);
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;If you want to tweak the names you may add an &lt;code&gt;@Embedded&lt;/code&gt; annotation, which allows you to provide a prefix.
+It does look a little weird to specify what should happen when upon loading the entity is all null values.
+But with &lt;code&gt;Embedded&lt;/code&gt; you have to although a primary key that is &lt;code&gt;null&lt;/code&gt; will cause problems all over the place and just won&apos;t work.&lt;/p&gt;
+&lt;pre&gt;&lt;code class=&quot;language-java&quot;&gt;class Employee {
+
+	@Id
+	@Embedded.Nullable(prefix = &quot;id_&quot;)
+	EmployeeId id;
+
+	String name;
+	
+	// ... 
+}
+
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class=&quot;language-sql&quot;&gt;create table employee
+(
+    id_organization    varchar(20),
+    id_employee_number int,
+    name            varchar(100)
+);
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Just as with normal ids Spring Data Relational uses the the value of id as an indication for new entities:
+If the id value is &lt;code&gt;null&lt;/code&gt;, then the entity is considered new and an insert will be performed.
+If the id value is not &lt;code&gt;null&lt;/code&gt;, an update is in order.&lt;/p&gt;
+&lt;p&gt;When saving a new entity with composite id you now face a minor problem: Composite Ids can&apos;t easily be generated via and autoincrement column, since it by definition consists of multiple columns.
+One way to handle this is to have a &lt;code&gt;BeforeConvertCallback&lt;/code&gt;&lt;/p&gt;
+&lt;pre&gt;&lt;code class=&quot;language-java&quot;&gt;@Bean
+BeforeConvertCallback&amp;#x3C;Employee&gt; idGeneration() {
+	return new BeforeConvertCallback&amp;#x3C;&gt;() {
+		AtomicLong counter = new AtomicLong();
+
+		@Override
+		public Employee onBeforeConvert(Employee employee) {
+			if (employee.id == null) {
+				employee.id = new EmployeeId(Organization.RND, counter.addAndGet(1));
+			}
+			return employee;
+		}
+	};
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class=&quot;language-java&quot;&gt;repository.save(new Employee(&quot;Mark Paluch&quot;));
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;In most cases with composite id it is probably easier to set the id upfront and either use optimistic locking, i.e. a &lt;code&gt;null&lt;/code&gt; version field will mark the entity as new, or explicitely call &lt;code&gt;JdbcAggregateTemplate.insert&lt;/code&gt;.&lt;/p&gt;
+&lt;pre&gt;&lt;code class=&quot;language-java&quot;&gt;interface EmployeeRepository extends Repository&amp;#x3C;Employee, EmployeeId&gt;, InsertRepository&amp;#x3C;Employee&gt; {
+	Employee findById(EmployeeId id);
+
+	Employee save(Employee employee);
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class=&quot;language-java&quot;&gt;interface InsertRepository&amp;#x3C;E&gt; {
+	E insert(E employee);
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class=&quot;language-java&quot;&gt;class InsertRepositoryImpl&amp;#x3C;E&gt; implements InsertRepository&amp;#x3C;E&gt; {
+	@Autowired
+	private JdbcAggregateTemplate template;
+	@Override
+	public E insert(E employee) {
+		return template.insert(employee);
+	}
+}
+&lt;/code&gt;&lt;/pre&gt;
+&lt;pre&gt;&lt;code class=&quot;language-java&quot;&gt;@Autowired
+EmployeeRepository repository;
+
+// ...
+
+repository.insert(new Employee(new EmployeeId(Organization.RND, 23L), &quot;Jens Schauder&quot;));
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;I hope you find this new addition to Spring Data Relational useful.
+The full code for the samples used in this article can be found at &lt;a href=&quot;https://github.com/spring-projects/spring-data-examples/tree/main/jdbc/composite-ids&quot;&gt;https://github.com/spring-projects/spring-data-examples/tree/main/jdbc/composite-ids&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;If you find bugs or have ideas for improvements, please create a ticket at &lt;a href=&quot;https://github.com/spring-projects/spring-data-relational/issues&quot;&gt;https://github.com/spring-projects/spring-data-relational/issues&lt;/a&gt;.&lt;/p&gt;</content:encoded></item><item><title><![CDATA[Spring AMQP 4.0 Milestone 3 Available]]></title><link>https://spring.io/blog/2025/07/21/spring-amqp-4-0-0-m3-available</link><guid isPermaLink="true">https://spring.io/blog/2025/07/21/spring-amqp-4-0-0-m3-available</guid><dc:creator><![CDATA[artembilan]]></dc:creator><pubDate>Mon, 21 Jul 2025 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;On behalf of the team and everyone who contributed, I am pleased to announce the third Milstone for &lt;code&gt;4.0.0&lt;/code&gt; of Spring AMQP.&lt;/p&gt;
+&lt;p&gt;The patch versions &lt;code&gt;3.2.6&lt;/code&gt; also has been released.&lt;/p&gt;
+&lt;p&gt;The notable changes in this milestone are:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Jackson 3 support (with Jackson 2 components deprecation);&lt;/li&gt;
+&lt;li&gt;JUnit 4 componetns deprecation;&lt;/li&gt;
+&lt;li&gt;Improvements for &lt;code&gt;BlockingQueueConsumer&lt;/code&gt; during shutdonw phase.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;See more info in the &lt;a href=&quot;https://github.com/spring-projects/spring-amqp/releases/tag/v4.0.0-M3&quot;&gt;Release Notes&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Don&apos;t hasitate to reach us out in GitHub issues for the project!&lt;/p&gt;
+&lt;p&gt;Cheers, &lt;br&gt;
+Artem&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;http://projects.spring.io/spring-amqp/&quot;&gt;Project Page&lt;/a&gt; | &lt;a href=&quot;https://github.com/spring-projects/spring-amqp/issues&quot;&gt;GitHub Issues&lt;/a&gt; | &lt;a href=&quot;https://github.com/spring-projects/spring-amqp/blob/main/CONTRIBUTING.adoc&quot;&gt;Contributing&lt;/a&gt; | &lt;a href=&quot;http://stackoverflow.com/questions/tagged/spring-amqp&quot;&gt;Help&lt;/a&gt;&lt;/p&gt;</content:encoded></item><item><title><![CDATA[Spring REST Docs 4.0.0-M1]]></title><link>https://spring.io/blog/2025/07/21/spring-rest-docs-4</link><guid isPermaLink="true">https://spring.io/blog/2025/07/21/spring-rest-docs-4</guid><dc:creator><![CDATA[wilkinsona]]></dc:creator><pubDate>Mon, 21 Jul 2025 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;On behalf of the team and everyone who has contributed, I am pleased to announce that Spring REST Docs &lt;code&gt;4.0.0-M1&lt;/code&gt; is now available from Maven Central.&lt;/p&gt;
+&lt;p&gt;This initial 4.0 milestone contains &lt;a href=&quot;https://github.com/spring-projects/spring-restdocs/releases/tag/v4.0.0-M1&quot;&gt;13 enhancements, documentation improvements, and dependency upgrades&lt;/a&gt;.
+It upgrades to Spring Framework 7 and Hibernate Validator 9.
+It also provides null safety through JSpecify annotations as part of the &lt;a href=&quot;https://spring.io/blog/2025/03/10/null-safety-in-spring-apps-with-jspecify-and-null-away&quot;&gt;previously announced&lt;/a&gt; effort across the whole Spring portfolio.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://spring.io/projects/spring-restdocs/&quot;&gt;Project Page&lt;/a&gt; | &lt;a href=&quot;https://github.com/spring-projects/spring-restdocs&quot;&gt;GitHub&lt;/a&gt; | &lt;a href=&quot;https://github.com/spring-projects/spring-restdocs/issues&quot;&gt;Issues&lt;/a&gt; | &lt;a href=&quot;https://docs.spring.io/spring-restdocs/docs/4.0.0-M1/reference/htmlsingle&quot;&gt;Documentation&lt;/a&gt; | &lt;a href=&quot;https://stackoverflow.com/questions/tagged/spring-restdocs&quot;&gt;Stack Overflow&lt;/a&gt;&lt;/p&gt;</content:encoded></item><item><title><![CDATA[Spring for Apache Kafka 4.0.0-M3 is Available Now]]></title><link>https://spring.io/blog/2025/07/21/spring-kafka-4</link><guid isPermaLink="true">https://spring.io/blog/2025/07/21/spring-kafka-4</guid><dc:creator><![CDATA[sobychacko]]></dc:creator><pubDate>Mon, 21 Jul 2025 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;On behalf of the team and everyone who contributed, we are pleased to announce that Spring for Apache Kafka &lt;code&gt;4.0.0-M3&lt;/code&gt; has been released.&lt;/p&gt;
+&lt;p&gt;We extend our gratitude to all contributors who made these releases possible.&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;4.0.0-M3&lt;/code&gt; provides initial support for Kafka queues (Share consumers) introduced via &lt;a href=&quot;https://cwiki.apache.org/confluence/display/KAFKA/KIP-932%3A+Queues+for+Kafka&quot;&gt;KIP-932&lt;/a&gt; in Apache Kafka &lt;code&gt;4.0.0&lt;/code&gt;.
+Keep in mind that in Apache Kafka &lt;code&gt;4.0.0&lt;/code&gt;, queue support is introduced as an early access feature, and as such, the support that Spring for Apache Kafka provides for this should be considered early access and experimental as well.&lt;/p&gt;
+&lt;p&gt;You can find more details about it in the reference documentation for &lt;a href=&quot;https://docs.spring.io/spring-kafka/reference/4.0/kafka/kafka-queues.html&quot;&gt;Spring for Apache Kafka 4.0.0-M3&lt;/a&gt;.&lt;/p&gt;
+&lt;h4 id=&quot;release-notes&quot; style=&quot;position:relative;&quot;&gt;&lt;a href=&quot;#release-notes&quot; aria-label=&quot;release notes permalink&quot; class=&quot;anchor before&quot;&gt;&lt;svg aria-hidden=&quot;true&quot; focusable=&quot;false&quot; height=&quot;16&quot; version=&quot;1.1&quot; viewBox=&quot;0 0 16 16&quot; width=&quot;16&quot;&gt;&lt;path fill-rule=&quot;evenodd&quot; d=&quot;M4 9h1v1H4c-1.5 0-3-1.69-3-3.5S2.55 3 4 3h4c1.45 0 3 1.69 3 3.5 0 1.41-.91 2.72-2 3.25V8.59c.58-.45 1-1.27 1-2.09C10 5.22 8.98 4 8 4H4c-.98 0-2 1.22-2 2.5S3 9 4 9zm9-3h-1v1h1c1 0 2 1.22 2 2.5S13.98 12 13 12H9c-.98 0-2-1.22-2-2.5 0-.83.42-1.64 1-2.09V6.25c-1.09.53-2 1.84-2 3.25C6 11.31 7.55 13 9 13h4c1.45 0 3-1.69 3-3.5S14.5 6 13 6z&quot;&gt;&lt;/path&gt;&lt;/svg&gt;&lt;/a&gt;Release Notes&lt;/h4&gt;
+&lt;p&gt;&lt;code&gt;4.0.0-M3&lt;/code&gt; release notes: &lt;a href=&quot;https://github.com/spring-projects/spring-kafka/releases/tag/v4.0.0-M3&quot;&gt;https://github.com/spring-projects/spring-kafka/releases/tag/v4.0.0-M3&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;We also released a patch GA version for &lt;code&gt;3.3.8&lt;/code&gt;, and you can find the release notes at &lt;a href=&quot;https://github.com/spring-projects/spring-kafka/releases/tag/v3.3.8&quot;&gt;https://github.com/spring-projects/spring-kafka/releases/tag/v3.3.8&lt;/a&gt;.&lt;/p&gt;
+&lt;h4 id=&quot;spring-boot-integration&quot; style=&quot;position:relative;&quot;&gt;&lt;a href=&quot;#spring-boot-integration&quot; aria-label=&quot;spring boot integration permalink&quot; class=&quot;anchor before&quot;&gt;&lt;svg aria-hidden=&quot;true&quot; focusable=&quot;false&quot; height=&quot;16&quot; version=&quot;1.1&quot; viewBox=&quot;0 0 16 16&quot; width=&quot;16&quot;&gt;&lt;path fill-rule=&quot;evenodd&quot; d=&quot;M4 9h1v1H4c-1.5 0-3-1.69-3-3.5S2.55 3 4 3h4c1.45 0 3 1.69 3 3.5 0 1.41-.91 2.72-2 3.25V8.59c.58-.45 1-1.27 1-2.09C10 5.22 8.98 4 8 4H4c-.98 0-2 1.22-2 2.5S3 9 4 9zm9-3h-1v1h1c1 0 2 1.22 2 2.5S13.98 12 13 12H9c-.98 0-2-1.22-2-2.5 0-.83.42-1.64 1-2.09V6.25c-1.09.53-2 1.84-2 3.25C6 11.31 7.55 13 9 13h4c1.45 0 3-1.69 3-3.5S14.5 6 13 6z&quot;&gt;&lt;/path&gt;&lt;/svg&gt;&lt;/a&gt;Spring Boot Integration&lt;/h4&gt;
+&lt;p&gt;The &lt;code&gt;4.0.0-M3&lt;/code&gt; release will be integrated into the upcoming Spring Boot &lt;code&gt;4.0.0-M1&lt;/code&gt; release.&lt;/p&gt;
+&lt;p&gt;The &lt;code&gt;3.3.8&lt;/code&gt; release will be included in the upcoming Spring Boot &lt;code&gt;3.5.4&lt;/code&gt; and &lt;code&gt;3.4.8&lt;/code&gt; releases.&lt;/p&gt;
+&lt;h4 id=&quot;staying-in-touch-with-the-project&quot; style=&quot;position:relative;&quot;&gt;&lt;a href=&quot;#staying-in-touch-with-the-project&quot; aria-label=&quot;staying in touch with the project permalink&quot; class=&quot;anchor before&quot;&gt;&lt;svg aria-hidden=&quot;true&quot; focusable=&quot;false&quot; height=&quot;16&quot; version=&quot;1.1&quot; viewBox=&quot;0 0 16 16&quot; width=&quot;16&quot;&gt;&lt;path fill-rule=&quot;evenodd&quot; d=&quot;M4 9h1v1H4c-1.5 0-3-1.69-3-3.5S2.55 3 4 3h4c1.45 0 3 1.69 3 3.5 0 1.41-.91 2.72-2 3.25V8.59c.58-.45 1-1.27 1-2.09C10 5.22 8.98 4 8 4H4c-.98 0-2 1.22-2 2.5S3 9 4 9zm9-3h-1v1h1c1 0 2 1.22 2 2.5S13.98 12 13 12H9c-.98 0-2-1.22-2-2.5 0-.83.42-1.64 1-2.09V6.25c-1.09.53-2 1.84-2 3.25C6 11.31 7.55 13 9 13h4c1.45 0 3-1.69 3-3.5S14.5 6 13 6z&quot;&gt;&lt;/path&gt;&lt;/svg&gt;&lt;/a&gt;Staying in Touch with the Project&lt;/h4&gt;
+&lt;p&gt;We encourage the community to provide us with any feedback on any of these releases.&lt;/p&gt;
+&lt;p&gt;Following are the usual avenues where you can engage with the project.&lt;/p&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/spring-projects/spring-kafka&quot;&gt;GitHub&lt;/a&gt; | &lt;a href=&quot;https://github.com/spring-projects/spring-kafka/issues&quot;&gt;Issues&lt;/a&gt; | &lt;a href=&quot;https://docs.spring.io/spring-kafka/reference&quot;&gt;Documentation&lt;/a&gt; | &lt;a href=&quot;https://stackoverflow.com/tags/spring-kafka&quot;&gt;Stack Overflow&lt;/a&gt;&lt;/p&gt;</content:encoded></item></channel></rss>
