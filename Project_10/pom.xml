@@ -25,7 +25,6 @@
 	</properties>
 
 	<dependencies>
-<<<<<<< HEAD
 
 	<dependency>
 		<groupId>org.springframework.boot</groupId>
